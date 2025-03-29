@@ -1,0 +1,119 @@
+public class StoredProcedureMetadata
+{
+    public string Schema { get; set; }
+    public string Name { get; set; }
+    
+    public string FullName => $"[{Schema}].[{Name}]";
+    public string UnescapedFullName => $"{Schema}.{Name}";
+    
+    public List<StoredProcedureParameter> Parameters { get; set; } = new List<StoredProcedureParameter>();
+    
+    public StoredProcedureMetadata()
+    {
+        Schema = "dbo";
+        Name = "";
+        Parameters = new List<StoredProcedureParameter>();
+    }
+    
+    public StoredProcedureMetadata(string fullName)
+    {
+        Parameters = new List<StoredProcedureParameter>();
+        ParseFullName(fullName);
+    }
+    
+    private void ParseFullName(string fullName)
+    {
+        if (string.IsNullOrWhiteSpace(fullName))
+        {
+            Schema = "dbo";
+            Name = "";
+            return;
+        }
+        
+        // Handle different formats of stored procedure names
+        // Format: [schema].[name] or schema.name
+        
+        // Remove any square brackets
+        string unbracketedName = fullName
+            .Replace("[", "")
+            .Replace("]", "");
+        
+        // Split by dot
+        string[] parts = unbracketedName.Split(new[] { '.' }, 2);
+        
+        if (parts.Length == 2)
+        {
+            Schema = parts[0];
+            Name = parts[1];
+        }
+        else
+        {
+            Schema = "dbo";
+            Name = unbracketedName;
+        }
+    }
+}
+
+public async Task<StoredProcedureMetadata> GetStoredProcedureMetadataAsync(string fullSprocName, string connectionString)
+{
+    // Create metadata object using the constructor that handles full names
+    var metadata = new StoredProcedureMetadata(fullSprocName);
+    
+    using var connection = new SqlConnection(connectionString);
+    await connection.OpenAsync();
+    
+    string sql = @"
+        SELECT 
+            p.name AS ParameterName,
+            t.name AS DataType,
+            p.is_output AS IsOutput,
+            p.max_length AS MaxLength,
+            p.precision AS Precision,
+            p.scale AS Scale,
+            p.parameter_id AS ParameterOrder,
+            p.is_nullable AS IsNullable,
+            p.default_value AS DefaultValue
+        FROM sys.procedures sp
+        INNER JOIN sys.parameters p ON sp.object_id = p.object_id
+        INNER JOIN sys.types t ON p.user_type_id = t.user_type_id
+        INNER JOIN sys.schemas sch ON sp.schema_id = sch.schema_id
+        WHERE sp.name = @SprocName
+        AND sch.name = @SchemaName
+        ORDER BY p.parameter_id";
+    
+    using var command = new SqlCommand(sql, connection);
+    command.Parameters.AddWithValue("@SprocName", metadata.Name);
+    command.Parameters.AddWithValue("@SchemaName", metadata.Schema);
+    
+    using var reader = await command.ExecuteReaderAsync();
+    while (await reader.ReadAsync())
+    {
+        metadata.Parameters.Add(new StoredProcedureParameter
+        {
+            Name = reader["ParameterName"].ToString(),
+            DataType = reader["DataType"].ToString(),
+            IsOutput = (bool)reader["IsOutput"],
+            MaxLength = reader["MaxLength"] != DBNull.Value ? (int?)reader["MaxLength"] : null,
+            Precision = reader["Precision"] != DBNull.Value ? (int?)reader["Precision"] : null,
+            Scale = reader["Scale"] != DBNull.Value ? (int?)reader["Scale"] : null,
+            ParameterOrder = (int)reader["ParameterOrder"],
+            IsNullable = (bool)reader["IsNullable"],
+            DefaultValue = reader["DefaultValue"] != DBNull.Value ? reader["DefaultValue"] : null
+        });
+    }
+    
+    return metadata;
+}
+
+// When executing, use the FullName property which includes brackets
+public async Task<DataTable> ExecuteStoredProcedureWithDefaultsAsync(StoredProcedureMetadata sprocMetadata, string connectionString)
+{
+    using var connection = new SqlConnection(connectionString);
+    await connection.OpenAsync();
+    
+    // Use the fully qualified name including schema with brackets
+    using var command = new SqlCommand(sprocMetadata.FullName, connection);
+    command.CommandType = CommandType.StoredProcedure;
+    
+    // Rest of the method remains the same...
+}
